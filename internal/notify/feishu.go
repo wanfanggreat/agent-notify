@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,7 +39,7 @@ func (clientToolsConfigProvider) Parse() (FeishuCLIConfig, error) {
 
 type feishuMessenger interface {
 	CreatorOpenID(ctx context.Context, appID string) (string, error)
-	SendCard(ctx context.Context, receiveOpenID string, card map[string]any) error
+	SendCard(ctx context.Context, receiveIDType, receiveID string, card map[string]any) error
 }
 
 type sdkFeishuMessenger struct {
@@ -47,18 +48,20 @@ type sdkFeishuMessenger struct {
 
 type FeishuSender struct {
 	provider     feishuConfigProvider
+	chatID       string
 	newMessenger func(appID, appSecret string) (feishuMessenger, error)
 }
 
-func NewFeishuSender(provider feishuConfigProvider) *FeishuSender {
+func NewFeishuSender(provider feishuConfigProvider, chatID string) *FeishuSender {
 	return &FeishuSender{
 		provider:     provider,
+		chatID:       strings.TrimSpace(chatID),
 		newMessenger: newSDKFeishuMessenger,
 	}
 }
 
-func NewDefaultFeishuSender() *FeishuSender {
-	return NewFeishuSender(clientToolsConfigProvider{})
+func NewDefaultFeishuSender(chatID string) *FeishuSender {
+	return NewFeishuSender(clientToolsConfigProvider{}, chatID)
 }
 
 func (s *FeishuSender) Name() string { return "feishu" }
@@ -74,13 +77,20 @@ func (s *FeishuSender) Send(ctx context.Context, msg Message) error {
 		return err
 	}
 
+	card := s.buildCard(msg)
+
+	if s.chatID != "" {
+		return messenger.SendCard(ctx, "chat_id", s.chatID, card)
+	}
+
 	creatorOpenID, err := messenger.CreatorOpenID(ctx, cfg.AppID)
 	if err != nil {
 		return err
 	}
-
-	card := s.buildCard(msg)
-	return messenger.SendCard(ctx, creatorOpenID, card)
+	if err := messenger.SendCard(ctx, "open_id", creatorOpenID, card); err != nil {
+		return hintFeishuSendError(err)
+	}
+	return nil
 }
 
 // buildCard creates a rich interactive card for Feishu notification
@@ -227,16 +237,16 @@ func (m *sdkFeishuMessenger) CreatorOpenID(ctx context.Context, appID string) (s
 	return *resp.Data.App.CreatorId, nil
 }
 
-func (m *sdkFeishuMessenger) SendCard(ctx context.Context, receiveOpenID string, card map[string]any) error {
+func (m *sdkFeishuMessenger) SendCard(ctx context.Context, receiveIDType, receiveID string, card map[string]any) error {
 	content, err := json.Marshal(card)
 	if err != nil {
 		return err
 	}
 
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType("open_id").
+		ReceiveIdType(receiveIDType).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(receiveOpenID).
+			ReceiveId(receiveID).
 			MsgType("interactive").
 			Content(string(content)).
 			Uuid(uuid.NewString()).
@@ -248,8 +258,30 @@ func (m *sdkFeishuMessenger) SendCard(ctx context.Context, receiveOpenID string,
 		return err
 	}
 	if !resp.Success() {
-		return fmt.Errorf("feishu send message failed: code=%d msg=%s", resp.Code, resp.Msg)
+		return &feishuSendError{Code: resp.Code, Msg: resp.Msg}
 	}
 
 	return nil
+}
+
+// feishuSendError 保留飞书 API 错误码，便于上层按码补充处置提示。
+type feishuSendError struct {
+	Code int
+	Msg  string
+}
+
+func (e *feishuSendError) Error() string {
+	return fmt.Sprintf("feishu send message failed: code=%d msg=%s", e.Code, e.Msg)
+}
+
+// 230101 未见于飞书官方错误码文档，实测为个人版租户对机器人 open_id
+// 主动发消息的内部限制；同会话改按 chat_id 发送不受影响。
+const errFeishuSendUnavailable = 230101
+
+func hintFeishuSendError(err error) error {
+	var sendErr *feishuSendError
+	if !errors.As(err, &sendErr) || sendErr.Code != errFeishuSendUnavailable {
+		return err
+	}
+	return fmt.Errorf("%w\n  飞书个人版租户禁止机器人主动给用户发消息：在 config.yaml 的 feishu 渠道配置 chat_id（oc_ 开头），或改用企业/团队租户", err)
 }

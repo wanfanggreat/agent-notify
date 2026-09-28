@@ -95,6 +95,10 @@ type ChannelsConfig struct {
 // ChannelConfig holds configuration for a single notification channel.
 type ChannelConfig struct {
 	Enabled bool `yaml:"enabled"` // 是否启用该通知渠道
+	// ChatID 为可选的飞书会话 ID（oc_ 开头）。飞书个人版租户禁止机器人按
+	// open_id 主动给用户发消息（API 返回未公开文档的 230101），配置 chat_id
+	// 后改按会话通道发送，可绕开该限制。
+	ChatID string `yaml:"chat_id,omitempty"`
 }
 
 const (
