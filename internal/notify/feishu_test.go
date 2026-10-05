@@ -19,15 +19,18 @@ func (p stubFeishuConfigProvider) Parse() (FeishuCLIConfig, error) {
 }
 
 type stubFeishuMessenger struct {
-	creatorAppID  string
-	creatorOpenID string
-	sentReceiveID string
-	sentCard      map[string]any
-	creatorErr    error
-	sendErr       error
+	creatorAppID    string
+	creatorOpenID   string
+	creatorCalled   bool
+	sentReceiveType string
+	sentReceiveID   string
+	sentCard        map[string]any
+	creatorErr      error
+	sendErr         error
 }
 
 func (m *stubFeishuMessenger) CreatorOpenID(ctx context.Context, appID string) (string, error) {
+	m.creatorCalled = true
 	m.creatorAppID = appID
 	if m.creatorErr != nil {
 		return "", m.creatorErr
@@ -35,8 +38,9 @@ func (m *stubFeishuMessenger) CreatorOpenID(ctx context.Context, appID string) (
 	return m.creatorOpenID, nil
 }
 
-func (m *stubFeishuMessenger) SendCard(ctx context.Context, receiveOpenID string, card map[string]any) error {
-	m.sentReceiveID = receiveOpenID
+func (m *stubFeishuMessenger) SendCard(ctx context.Context, receiveIDType, receiveID string, card map[string]any) error {
+	m.sentReceiveType = receiveIDType
+	m.sentReceiveID = receiveID
 	m.sentCard = card
 	return m.sendErr
 }
@@ -49,7 +53,7 @@ func TestFeishuSenderSendUsesCLIConfigAndCreator(t *testing.T) {
 		},
 	}
 	messenger := &stubFeishuMessenger{creatorOpenID: "ou_creator"}
-	sender := NewFeishuSender(provider)
+	sender := NewFeishuSender(provider, "")
 	sender.newMessenger = func(appID, appSecret string) (feishuMessenger, error) {
 		if appID != "cli_app" {
 			t.Fatalf("appID = %q, want cli_app", appID)
@@ -89,7 +93,7 @@ func TestFeishuSenderSendUsesCLIConfigAndCreator(t *testing.T) {
 }
 
 func TestFeishuSenderSendReturnsConfigError(t *testing.T) {
-	sender := NewFeishuSender(stubFeishuConfigProvider{err: errors.New("missing config")})
+	sender := NewFeishuSender(stubFeishuConfigProvider{err: errors.New("missing config")}, "")
 
 	err := sender.Send(context.Background(), Message{Title: "t", Body: "b"})
 	if err == nil {
@@ -97,6 +101,50 @@ func TestFeishuSenderSendReturnsConfigError(t *testing.T) {
 	}
 	if err.Error() != "missing config" {
 		t.Fatalf("Send() error = %v, want missing config", err)
+	}
+}
+
+func TestFeishuSenderSendUsesConfiguredChatID(t *testing.T) {
+	messenger := &stubFeishuMessenger{}
+	sender := NewFeishuSender(stubFeishuConfigProvider{cfg: FeishuCLIConfig{AppID: "cli_app", AppSecret: "secret"}}, "oc_chat")
+	sender.newMessenger = func(appID, appSecret string) (feishuMessenger, error) {
+		return messenger, nil
+	}
+
+	if err := sender.Send(context.Background(), Message{Title: "t", Body: "b"}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	if messenger.creatorCalled {
+		t.Fatal("CreatorOpenID should be skipped when chat_id is configured")
+	}
+	if messenger.sentReceiveType != "chat_id" {
+		t.Fatalf("receiveIDType = %q, want chat_id", messenger.sentReceiveType)
+	}
+	if messenger.sentReceiveID != "oc_chat" {
+		t.Fatalf("receiveID = %q, want oc_chat", messenger.sentReceiveID)
+	}
+}
+
+func TestFeishuSenderSendHintsOnPersonalTenantRestriction(t *testing.T) {
+	messenger := &stubFeishuMessenger{
+		creatorOpenID: "ou_creator",
+		sendErr:       &feishuSendError{Code: 230101, Msg: "Sending messages to users is temporarily unavailable."},
+	}
+	sender := NewFeishuSender(stubFeishuConfigProvider{cfg: FeishuCLIConfig{AppID: "cli_app", AppSecret: "secret"}}, "")
+	sender.newMessenger = func(appID, appSecret string) (feishuMessenger, error) {
+		return messenger, nil
+	}
+
+	err := sender.Send(context.Background(), Message{Title: "t", Body: "b"})
+	if err == nil {
+		t.Fatal("Send() error = nil, want send error")
+	}
+	if !contains(err.Error(), "chat_id") {
+		t.Fatalf("Send() error = %v, want hint mentioning chat_id", err)
+	}
+	if !contains(err.Error(), "code=230101") {
+		t.Fatalf("Send() error = %v, want original code preserved", err)
 	}
 }
 

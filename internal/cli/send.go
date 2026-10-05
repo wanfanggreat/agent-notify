@@ -105,7 +105,7 @@ func newConfiguredSender(cfg config.Config, agent, channel string) (notify.Sende
 			notifyCfg.Channels.System.EffectiveFocusDebug(),
 		), nil
 	case "feishu":
-		return notify.NewDefaultFeishuSender(), nil
+		return notify.NewDefaultFeishuSender(notifyCfg.Channels.Feishu.ChatID), nil
 	case "wechat":
 		if strings.TrimSpace(notifyCfg.Channels.Wechat.WebhookURL) == "" {
 			return nil, fmt.Errorf("wechat webhook is not configured for agent %s", normalizeSendAgent(agent))

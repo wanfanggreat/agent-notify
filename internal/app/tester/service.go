@@ -234,7 +234,13 @@ func (s *Service) feishuNotificationSender() notify.Sender {
 	if s.feishuSender != nil {
 		return s.feishuSender
 	}
-	return notify.NewDefaultFeishuSender()
+	chatID := ""
+	if cfgPath, err := s.defaultConfigPath(); err == nil {
+		if cfg, err := s.loadConfig(cfgPath); err == nil {
+			chatID = cfg.Notify.ClaudeCode.Channels.Feishu.ChatID
+		}
+	}
+	return notify.NewDefaultFeishuSender(chatID)
 }
 
 func (s *Service) systemNotificationSender() notify.Sender {
